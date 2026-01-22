@@ -1,74 +1,274 @@
 import pandas as pd
 import firebase_admin
-from firebase_admin import credentials
-from firebase_admin import firestore
-import os
+from firebase_admin import credentials, firestore
+from typing import List, Dict, Optional
+from pathlib import Path
+import logging
+import time
+from datetime import datetime
 
-# 1. Initialize the SDK
-cred = credentials.Certificate("/home/juan/Desktop/Juan/code/.creds/creds-myheart-counts-development.json")
-firebase_admin.initialize_app(cred)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# 2. Get a reference to the database
-db = firestore.client()
 
-user_df = pd.DataFrame()
-# doc_ref = db.collection("users").document("3oflMC0bFZfL6xkC4jblequIRXn2")
-
-docs = db.collection("users").stream()
-
-df = pd.DataFrame()
-for i0,doc in enumerate(docs):
-    try:
-    # if True:
-        user = doc.to_dict()
-        user.update({'user_id': doc.id})
-        user_df = pd.concat([user_df, pd.DataFrame(user, index=[0])], ignore_index=True)
-        user_df.to_csv(f'firestore_user_temp{doc.id}.csv')
-
-        # List subcollections
-        doc_ref = db.collection("users").document(doc.id)
-        try:
-            doc_ref.collections()
-        except Exception as e:
-            print(e)
-            continue
-
-        subcollections = [sub_col.id for sub_col in doc_ref.collections()]
-        A = []
-        for i,subcollection in enumerate(subcollections):
-            if subcollection.startswith("HealthObservations"):
-                metrics = doc_ref.collection(subcollection).stream()
-                try:                
-                    for metric in metrics:
-                        if not 'effectivePeriod' in metric.to_dict() or metric.to_dict()['effectivePeriod'] is None:
-                            continue
-                        
-                        # print(f"Order ID: {metric.id} => {metric.to_dict()['valueString']}")
-                        aux = metric.to_dict()['effectivePeriod']
-                        aux.update({'value': metric.to_dict()['valueString'] if 'valueString' in metric.to_dict() else None,
-                                    'metric': subcollection,
-                                    'user_id': doc_ref.id})
-
-                        A.append(aux)
-                    # break
-                # if i >= 2:
-                #     break
-                except Exception as e:
-                    print(e)
-                    continue
-        df_aux = pd.DataFrame(A)
-        df_aux.to_csv(f'firestore_temp{doc.id}.csv')
-        df = pd.concat([df, df_aux], ignore_index=True)
-        # if i0 >= 2:
-            #     break
-    except Exception as e:
-        print(e)
-
-# analytics
-df = pd.concat([pd.read_csv(p) for p in os.listdir('.') if p.startswith('firestore_temp')],axis=0,ignore_index=True)
-
-df_a = df.groupby(['user_id','metric'])['start'].agg(['min','max','count']).reset_index()
-df_a['span'] = (pd.to_datetime(df_a['max'],format='ISO8601') - pd.to_datetime(df_a['min'],format='ISO8601')).dt.days
-
-df_a.to_csv('firestore_snapshot.csv')
+class FirestoreDataExtractor:
+    """Efficiently extracts health data from Firestore with rate limiting and batching."""
     
+    def __init__(self, creds_path: str, output_dir: str = 'temp', 
+                 batch_size: int = 500, rate_limit_delay: float = 0.1):
+        """
+        Initialize Firebase and setup output directory.
+        
+        Args:
+            creds_path: Path to Firebase credentials
+            output_dir: Directory for output files
+            batch_size: Number of documents to fetch per batch
+            rate_limit_delay: Delay in seconds between batches
+        """
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(exist_ok=True)
+        self.batch_size = batch_size
+        self.rate_limit_delay = rate_limit_delay
+        
+        cred = credentials.Certificate(creds_path)
+        if not firebase_admin._apps:
+            firebase_admin.initialize_app(cred)
+        self.db = firestore.client()
+        
+        # Track query counts
+        self.query_count = 0
+    
+    def extract_user_info(self, doc) -> Dict:
+        """Extract user information from document."""
+        user_data = doc.to_dict()
+        user_data['user_id'] = doc.id
+        return user_data
+    
+    def extract_health_observation(self, metric_doc, subcollection_name: str, user_id: str) -> Optional[Dict]:
+        """Extract health observation data from a metric document."""
+        data = metric_doc.to_dict()
+        
+        # Skip if no effectivePeriod
+        if 'effectivePeriod' not in data or data['effectivePeriod'] is None:
+            return None
+        
+        # Build result dictionary
+        result = data['effectivePeriod'].copy()
+        result.update({
+            'value_str': data.get('valueString'),
+            'metric': subcollection_name,
+            'user_id': user_id
+        })
+        
+        # Add quantity data if available
+        if 'valueQuantity' in data:
+            quantity = data['valueQuantity']
+            result.update({
+                'value': quantity.get('value'),
+                'unit': quantity.get('unit')
+            })
+        
+        return result
+    
+    def process_user_subcollections_with_pagination(self, user_id: str) -> List[Dict]:
+        """
+        Process HealthObservations with pagination and rate limiting.
+        Uses limit() and startAfter() for controlled batching.
+        """
+        observations = []
+        doc_ref = self.db.collection("users").document(user_id)
+        
+        try:
+            # Single query to get subcollections
+            subcollections = list(doc_ref.collections())
+            self.query_count += 1
+        except Exception as e:
+            logger.error(f"Error getting subcollections for user {user_id}: {e}")
+            return observations
+        
+        # Process only HealthObservations subcollections
+        health_collections = [
+            sub_col for sub_col in subcollections 
+            if sub_col.id.startswith("HealthObservations")
+        ]
+        
+        for subcollection in health_collections:
+            try:
+                observations.extend(
+                    self._process_collection_batched(subcollection, user_id)
+                )
+            except Exception as e:
+                logger.error(f"Error processing {subcollection.id} for user {user_id}: {e}")
+        
+        return observations
+    
+    def _process_collection_batched(self, collection_ref, user_id: str) -> List[Dict]:
+        """Process a collection in batches with rate limiting."""
+        observations = []
+        last_doc = None
+        batch_num = 0
+        
+        while True:
+            # Build query with pagination
+            query = collection_ref.limit(self.batch_size)
+            if last_doc:
+                query = query.start_after(last_doc)
+            
+            # Execute batch query
+            batch = list(query.stream())
+            self.query_count += 1
+            
+            if not batch:
+                break
+            
+            batch_num += 1
+            logger.debug(f"Processing batch {batch_num} ({len(batch)} docs) for {collection_ref.id}")
+            
+            # Process documents in batch
+            for metric_doc in batch:
+                observation = self.extract_health_observation(
+                    metric_doc, 
+                    collection_ref.id, 
+                    user_id
+                )
+                if observation:
+                    observations.append(observation)
+            
+            # Update pagination cursor
+            last_doc = batch[-1]
+            
+            # Rate limiting
+            if len(batch) == self.batch_size:
+                time.sleep(self.rate_limit_delay)
+            else:
+                break  # Last batch (incomplete)
+        
+        return observations
+    
+    def process_users_in_batches(self, user_batch_size: int = 10) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        Process users in batches to avoid memory issues.
+        
+        Args:
+            user_batch_size: Number of users to process before saving checkpoint
+            
+        Returns:
+            Tuple of (user_df, observations_df)
+        """
+        users_data = []
+        all_observations = []
+        
+        # Query all users with pagination
+        logger.info("Fetching users in batches...")
+        users_query = self.db.collection("users")
+        self.query_count += 1
+        
+        last_user_doc = None
+        user_count = 0
+        
+        while True:
+            # Fetch batch of users
+            query = users_query.limit(user_batch_size)
+            if last_user_doc:
+                query = query.start_after(last_user_doc)
+            
+            user_batch = list(query.stream())
+            if not user_batch:
+                break
+            
+            user_count += len(user_batch)
+            logger.info(f"Processing users {user_count - len(user_batch) + 1} to {user_count}")
+            
+            # Process each user in batch
+            for user_doc in user_batch:
+                # Extract user info
+                user_info = self.extract_user_info(user_doc)
+                users_data.append(user_info)
+                
+                # Process user's health observations
+                observations = self.process_user_subcollections_with_pagination(user_doc.id)
+                all_observations.extend(observations)
+            
+            # Save checkpoint
+            self._save_checkpoint(users_data, all_observations)
+            
+            # Update pagination
+            last_user_doc = user_batch[-1]
+            
+            # Rate limiting between user batches
+            if len(user_batch) == user_batch_size:
+                time.sleep(self.rate_limit_delay * 2)
+            else:
+                break
+        
+        # Create final dataframes
+        user_df = pd.DataFrame(users_data)
+        observations_df = pd.DataFrame(all_observations)
+        
+        logger.info(f"Extracted {len(users_data)} users and {len(all_observations)} observations")
+        logger.info(f"Total Firestore queries: {self.query_count}")
+        
+        return user_df, observations_df
+    
+    def _save_checkpoint(self, users_data: List[Dict], observations: List[Dict]):
+        """Save checkpoint data during processing."""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        if users_data:
+            pd.DataFrame(users_data).to_csv(
+                self.output_dir / f'checkpoint_users_{timestamp}.csv', 
+                index=False
+            )
+        
+        if observations:
+            pd.DataFrame(observations).to_csv(
+                self.output_dir / f'checkpoint_observations_{timestamp}.csv', 
+                index=False
+            )
+    
+    def extract_all_data(self, user_batch_size: int = 10) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        Extract all users and their health observations with batching.
+        
+        Args:
+            user_batch_size: Number of users to process per batch
+            
+        Returns:
+            Tuple of (user_df, observations_df)
+        """
+        return self.process_users_in_batches(user_batch_size)
+    
+    def save_final_results(self, user_df: pd.DataFrame, observations_df: pd.DataFrame):
+        """Save final consolidated results."""
+        user_df.to_csv(self.output_dir / 'users_final.csv', index=False)
+        observations_df.to_csv(self.output_dir / 'observations_final.csv', index=False)
+        logger.info("Final results saved")
+
+
+def main():
+    """Main execution function."""
+    # Initialize extractor with batching and rate limiting
+    extractor = FirestoreDataExtractor(
+        creds_path="/home/juan/Desktop/Juan/code/.creds/creds-myheart-counts-development.json",
+        output_dir='temp',
+        batch_size=500,  # Fetch 500 docs per query
+        rate_limit_delay=0.5  # 500ms delay between batches
+    )
+    
+    # Extract all data with user batching
+    user_df, observations_df = extractor.extract_all_data(user_batch_size=10)
+    
+    # Save final results
+    extractor.save_final_results(user_df, observations_df)
+    
+    # Print summary
+    print(f"\nSummary:")
+    print(f"Total users: {len(user_df)}")
+    print(f"Total observations: {len(observations_df)}")
+    print(f"Total Firestore queries: {extractor.query_count}")
+    if not observations_df.empty:
+        print(f"Unique metrics: {observations_df['metric'].nunique()}")
+
+
+if __name__ == "__main__":
+    main()
