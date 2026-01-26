@@ -6,6 +6,8 @@
 
 import pandas as pd
 import json
+import altair as alt
+import numpy as np
 
 types = {
     'sleep_diagnosis1': 'boolean',
@@ -53,37 +55,219 @@ with open('source_data/labels_labels.json', 'r') as f:
         # summary
         if types[k] == 'boolean' or types[k] == 'categorical':
             aux2 = df2.groupby(['HealthCode','values']).aggregate({'timestamps':['count','min','max']} ).reset_index()   
-            aux2.columns = aux2.columns.map('_'.join)
+            aux2.columns = [c.strip('_') for c in aux2.columns.map('_'.join)]
             aux2['labels'] = k
             auxlbls_cat = pd.concat([auxlbls_cat, aux2], ignore_index=True)
         elif types[k] == 'float' or types[k] == 'ordinal':
             df2['values'] = pd.to_numeric(df2['values'], errors='coerce')
+            # add 25% and 75% quantiles
             aux2 = df2.groupby('HealthCode').aggregate({'timestamps':['count','min','max'],
-                                    'values':['mean','median','max','min']}).reset_index()
-            aux2.columns = aux2.columns.map('_'.join)   
+                                    'values':['mean','median','max','min',lambda x: x.quantile(0.25),lambda x: x.quantile(0.75)]}).reset_index()
+            aux2.columns = [c.strip('_') for c in aux2.columns.map('_'.join)]
         
             aux2['labels'] = k
             auxlbls_val = pd.concat([auxlbls_val, aux2], ignore_index=True)
 
-auxlbls_cat.to_csv('cat.csv')
-auxlbls_val.to_csv('val.csv')
+auxlbls_cat.to_csv('temp/cat.csv',index=False)
+auxlbls_val.to_csv('temp/val.csv',index=False)
+
+# Analyse values first
+
+auxlbls_val.loc[:,[ 'values_mean', 'values_median', 'values_max', 'values_min',
+       'values_<lambda_0>', 'values_<lambda_1>','labels']].groupby('labels').mean()
+#                         values_mean  values_median  values_max  values_min  values_25%  values_75%
+# labels                                                                                                          
+# DiastolicBloodPressure    76.389566      76.399505   77.817208   74.971691          75.753715          77.011551
+# GoSleepTime                     NaN            NaN         NaN         NaN                NaN                NaN
+# Hdl                        2.846491       2.846858    2.942923    2.750366           2.805061           2.887792
+# HeightCentimeters        169.179319     169.376857  170.278945  167.697655         168.677256         169.835897
+# Ldl                        5.763295       5.762563    5.928583    5.595296           5.689500           5.837949
+# SystolicBloodPressure    120.260620     120.208608  122.335861  118.346302         119.365926         121.088964
+# TotalCholesterol           9.604654       9.603673    9.805658    9.400143           9.519232           9.691595
+# WakeUpTime                      NaN            NaN         NaN         NaN                NaN                NaN
+# WeightKilograms           77.157179      77.285785   78.417444   75.673144          76.559442          77.844495
+# atwork                     1.291564       1.290765    1.303216    1.281147           1.285916           1.296667
+# feel_worthwhile1           7.333688       7.340972    7.644852    7.001277           7.183704           7.490637
+# feel_worthwhile2           7.054989       7.065165    7.403626    6.680981           6.885993           7.232285
+# feel_worthwhile3           4.579277       4.564755    5.169351    4.027074           4.298836           4.847206
+# feel_worthwhile4           2.597362       2.579999    3.042800    2.199809           2.388738           2.788760
+# happiness                  7.221016       7.288013    7.961086    6.181360           6.942890           7.564917
+# phys_activity              3.026438       3.025707    3.096056    2.956731           2.993261           3.059779
+# satisfiedwith_life         7.094927       7.105111    7.402382    6.762392           6.945989           7.252307
+# sleep_time                 7.814135       7.813702    7.862418    7.768029           7.792652           7.835219
+# sleep_time1                7.062555       7.060119    7.125603    7.004373           7.033892           7.089311
+# vigorous_act              73.407834      72.915853   78.833447   69.044003          70.965898          75.419630
+
+# now get the labels one by one
+
+# blood pressure categories
+
+dia = dflbls.query('labels == "DiastolicBloodPressure"').sort_values(by='timestamps',ascending=False).drop_duplicates(subset=['HealthCode']).loc[:,['HealthCode','values']]
+dia['values'] = dia['values'].astype(float)
+
+sys = dflbls.query('labels == "SystolicBloodPressure"').sort_values(by='timestamps',ascending=False).drop_duplicates(subset=['HealthCode']).loc[:,['HealthCode','values']]
+sys['values'] = sys['values'].astype(float)
+
+sys_dia = pd.merge(sys, dia, on='HealthCode', suffixes=('_systolic', '_diastolic'))
+# identify the flips
+idx = sys_dia['values_diastolic'] > sys_dia['values_systolic']
+sys_temp = sys_dia.loc[idx,'values_systolic'].copy()
+dia_temp = sys_dia.loc[idx,'values_diastolic'].copy()
+sys_dia.loc[idx,'values_systolic'] = dia_temp
+sys_dia.loc[idx,'values_diastolic'] = sys_temp
+del sys_temp, dia_temp
+# now get into categories
+def categorize_bp(row):
+    systolic = row['values_systolic']
+    diastolic = row['values_diastolic']
+    if systolic < 120 and diastolic < 80:
+        return "Normal"
+    elif 120 <= systolic < 130 and diastolic < 80:
+        return "Elevated"
+    elif (130 <= systolic < 140) or (80 <= diastolic < 90):
+        return "Hypertension_Stage_1"
+    elif (140 <= systolic) or (90 <= diastolic):
+        return "Hypertension_Stage_2"
+    elif systolic > 180 or diastolic > 120:
+        return "Hypertensive_Crisis"
+    else:
+        return "Uncategorized"
+sys_dia['bp_category'] = sys_dia.apply(categorize_bp, axis=1)
+sys_dia.to_csv('temp/blood_pressure_categories.csv',index=False)
+
+# BMI 
+height = dflbls.query('labels == "HeightCentimeters"').sort_values(by='timestamps',ascending=False).drop_duplicates(subset=['HealthCode']).loc[:,['HealthCode','values']]
+height['values'] = height['values'].astype(float) / 100  # convert to meters    
+weight = dflbls.query('labels == "WeightKilograms"').groupby('HealthCode')['values'].max().reset_index()
+weight['values'] = weight['values'].astype(float)
+bmi = pd.merge(weight, height, on='HealthCode', suffixes=('_weight', '_height'))
+bmi['BMI'] = bmi['values_weight'] / (bmi['values_height'] ** 2)
+bmi['categories'] = pd.cut(bmi['BMI'], 
+                           bins=[0, 19.9, 24.9, 29.9, 39.9, np.inf], 
+                           labels=['Underweight', 'Normal weight', 'Overweight', 'Obesity','Morbid Obesity'])
+bmi = bmi.query('values_height>=1.4 and values_height <=2.1 and values_weight >=40')
+bmi.to_csv('temp/bmi_categories.csv',index=False)
+
+# sleep_time
+sleep_time = dflbls.query('labels == "sleep_time"').sort_values(by='timestamps',ascending=False).drop_duplicates(subset=['HealthCode']).loc[:,['HealthCode','values']]
+sleep_time['values'] = sleep_time['values'].astype(float)
+sleep_time['sleep_category'] = pd.cut(sleep_time['values'], 
+                                      bins=[0, 6, 7, 9, np.inf], 
+                                      labels=['Insufficient', 'Short', 'Normal', 'Too Long'])
+sleep_time.query('values<=12').to_csv('temp/sleep_time_categories.csv',index=False)
+
+# WakeUpTime - these might be all wrong
+wake_time = dflbls.query('labels == "WakeUpTime"').sort_values(by='timestamps',ascending=False).drop_duplicates(subset=['HealthCode']).loc[:,['HealthCode','values']]
+wake_time['local_time'] = pd.to_datetime(wake_time['values']).dt.tz_localize(None)
+wake_time['hour'] = pd.to_datetime(wake_time['local_time']).dt.hour + (wake_time['local_time'].dt.minute / 60)
+wake_time['category'] = pd.cut(wake_time['hour'], 
+                                        bins=[0, 5, 7, 9, 24], 
+                                        labels=['Early Riser', 'Normal Riser', 'Late Riser', 'Very Late Riser'])
+wake_time.to_csv('temp/wake_time_categories.csv',index=False)
+
+# GoSleepTime
+go_sleep_time = dflbls.query('labels == "GoSleepTime"').sort_values(by='timestamps',ascending=False).drop_duplicates(subset=['HealthCode']).loc[:,['HealthCode','values']]
+go_sleep_time['local_time'] = pd.to_datetime(go_sleep_time['values']).dt.tz_localize(None)
+go_sleep_time['hour'] = pd.to_datetime(go_sleep_time['local_time']).dt.hour+ (go_sleep_time['local_time'].dt.minute / 60)
+go_sleep_time['category'] = pd.cut(go_sleep_time['hour'], 
+                                                bins=[0, 1, 7,19,21, 23, 24], ordered=False,
+                                                labels=['Late Sleeper','Very Late Sleeper','Shift Worker','Early Sleeper', 'Normal Sleeper', 'Late Sleeper'])
+go_sleep_time.to_csv('temp/go_sleep_time_categories.csv',index=False)
+
+# phychological factors
+#                       count      mean       std  min  25%  50%  75%   max
+# labels                                                                   
+# feel_worthwhile1    62188.0  7.488197  2.038789  0.0  7.0  8.0  9.0  10.0
+# feel_worthwhile2    62207.0  7.209880  2.076224  0.0  6.0  8.0  9.0  10.0
+# feel_worthwhile3    62171.0  4.292628  2.788223  0.0  2.0  4.0  7.0  10.0
+# feel_worthwhile4    61888.0  2.433412  2.644067  0.0  0.0  1.0  4.0  10.0
+# satisfiedwith_life  62261.0  7.270796  1.988985  0.0  6.0  8.0  9.0  10.0
+
+cuts = {'feel_worthwhile1':[0,4,6,8,10.1],
+        'feel_worthwhile2':[0,4,6,8,10.1],
+        'feel_worthwhile3':[0,4,6,8,10.1],
+        'feel_worthwhile4':[0,1,3,5,10.1],
+        'satisfiedwith_life':[0,4,6,8,10.1]}
+dfpsych_all = pd.DataFrame()
+for var,cut in cuts.items():
+    dfpsych = dflbls.query('labels == @var').sort_values(by='timestamps',ascending=False).drop_duplicates(subset=['HealthCode']).copy()
+    dfpsych['values'] = pd.to_numeric(dfpsych['values'], errors='coerce')
+    # dfcut with the above thresholds
+    dfpsych['category'] = pd.cut(dfpsych['values'], bins=cut, labels=['Low','Medium','High','Very High'])
+    dfpsych_all = pd.concat([dfpsych_all, dfpsych], ignore_index=True)
+dfpsych_all.to_csv('temp/psychological_factors_categories.csv',index=False)
+
+# happiness                  7.221016       7.288013    7.961086    6.181360           6.942890           7.564917
+dfhappiness = dflbls.query('labels == "happiness"').copy()
+dfhappiness['values'] = pd.to_numeric(dfhappiness['values'], errors='coerce')
+# longitudinal happiness
+idx = dfhappiness.groupby('HealthCode')['values'].count()
+idx = idx[idx>=3].index
+dfhappiness_long = dfhappiness[dfhappiness['HealthCode'].isin(idx)].copy()
+# plot it - sample 20 participants
+sample_ids = dfhappiness_long['HealthCode'].sample(n=10, random_state=42).values
+dfhappiness_long2 = dfhappiness_long[dfhappiness_long['HealthCode'].isin(sample_ids)].copy() 
+alt.Chart(dfhappiness_long2).mark_circle().encode(
+    x='timestamps:T',
+    y='values:Q',
+    color='HealthCode:N',
+    tooltip=['HealthCode:N','timestamps:T','values:Q']
+).properties(
+    title='Longitudinal Happiness Scores'
+).save('figures/happiness_longitudinal.html')
+dfhappiness_long.to_csv('temp/happiness_longitudinal.csv',index=False)
+
+# happiness static values - categories
+dfhappiness_static = dfhappiness.sort_values(by='timestamps',ascending=False).drop_duplicates(subset=['HealthCode']).copy()
+dfhappiness_static['values'] = pd.to_numeric(dfhappiness_static['values'], errors='coerce')
+dfhappiness_static['category'] = pd.cut(dfhappiness_static['values'], 
+                                        bins=[0, 4, 6, 8, 10], 
+                                        labels=['Low','Medium','High','Very High'])
+dfhappiness_static.to_csv('temp/happiness_static_categories.csv',index=False)
+
+# phys_activity              3.026438       3.025707    3.096056    2.956731           2.993261           3.059779
+# vigorous_act             73.407834      72.915853   78.833447   69.044003          70.965898          75.419630
+dfactivity = dflbls.query('labels in ["phys_activity"]').sort_values(by='timestamps',ascending=False).drop_duplicates(subset=['HealthCode','timestamps']).copy()
+dfactivity['values'] = pd.to_numeric(dfactivity['values'], errors='coerce')
+dfvig = dflbls.query('labels in ["vigorous_act"]').sort_values(by='timestamps',ascending=False).drop_duplicates(subset=['HealthCode','timestamps']).copy()
+dfvig['values'] = pd.to_numeric(dfvig['values'], errors='coerce')
+# merge
+dfact = pd.merge(dfactivity.loc[:,['HealthCode','values']], 
+                 dfvig.loc[:,['HealthCode','values']],
+                   on=['HealthCode'], suffixes=('_phys','_vig'))
+dfact['vig_categories'] = pd.cut(dfact['values_vig'], 
+                                 bins=[0, 150, 300, 420, np.inf], 
+                                 labels=['Below recommendation','Good','High volume','Athlete training'])
+dfact['phys_categories'] = pd.cut(dfact['values_phys'], 
+                                 bins=[0, 2, 4.1, np.inf], 
+                                 labels=['Infrequent','Moderate','Frequent'])
+
+alt.Chart(dfact).mark_circle().encode(x='vig_categories:N',
+                                    y='vig_categories:N',
+                                    detail='HealthCode:N',
+                                    tooltip=['HealthCode:N','vig_categories:N','phys_categories:N']).save('figures/physical_activity_scatter.html')
+dfact.to_csv('temp/physical_activity_categories.csv',index=False)
 
 auxlbls_cat.groupby('labels').aggregate({'timestamps_count':'sum',
-                                         'HealthCode_':'nunique'}).sort_values('HealthCode_',ascending=False)
-#                   timestamps_count  HealthCode_
+                                         'HealthCode':'nunique'}).sort_values('HealthCode',ascending=False)
+#                   timestamps_count  HealthCode
 # labels                                         
-# sleep_diagnosis1             56541        44498
-# work                         56471        44430
 # heart_disease                42640        29957
 # vascular                     40090        29954
+# sleep_diagnosis2               966          348
+
+# current labels - binary 
 # BiologicalSex                45838        25217
 # Diabetes                     24384        10209
 # Hypertension                 24385        10209
-# sleep_diagnosis2               966          348
+# sleep_diagnosis1             56541        44498
+# work                         56471        44430
 
 auxlbls_val.groupby('labels').aggregate({'timestamps_count':'sum',
-                                         'HealthCode_':'nunique'}).sort_values('HealthCode_',ascending=False)
-#                         timestamps_count  HealthCode_
+                                         'HealthCode':'nunique'}).sort_values('HealthCode',ascending=False)
+
+# Labels for regression
+#                         timestamps_count  HealthCode
 # labels                                               
 # phys_activity                      56514        44443
 # sleep_time1                        56331        44362
@@ -105,3 +289,124 @@ auxlbls_val.groupby('labels').aggregate({'timestamps_count':'sum',
 # Hdl                                21682         9187
 # Ldl                                15356         6845
 # happiness                          41839         4163
+
+# plot distribution of one of the labels
+auxlbls_cat = pd.read_csv('temp/cat.csv')
+# auxlbls_cat = auxlbls_cat.melt(id_vars=['HealthCode','labels',
+#                                         'values','timestamps_count'], 
+#                                         value_vars=['timestamps_min', 'timestamps_max'], 
+#                                         var_name='timestamp', value_name='timestamp_values')
+
+
+heart_disease_map = {
+    "1": "Heart Attack/Myocardial Infarction",
+    "2": "Heart Bypass Surgery",
+    "3": "Coronary Blockage/Stenosis",
+    "4": "Coronary Stent/Angioplasty",
+    "5": "Angina (heart chest pains)",
+    "6": "High Coronary Calcium Score",
+    "7": "Heart Failure or CHF",
+    "8": "Atrial fibrillation (Afib)",
+    "9": "Congenital Heart",
+    "10": "None of the above",
+    "11": "Pulmonary Hypertension"
+}
+
+vascular_map = {
+    "1": "Stroke",
+    "2": "Transient Ischemic Attack (TIA)",
+    "3": "Carotid Artery Blockage/Stenosis",
+    "4": "Carotid Artery Surgery or Stent",
+    "5": "Peripheral Vascular Disease (Blockage/Stenosis, Surgery, or Stent)",
+    "6": "Abdominal Aortic Aneurysm",
+    "7": "None of the above",
+    "8": "Pulmonary Arterial Hypertension"
+}
+
+# map vascular diseases
+def map_diseases(labels,mapping):
+    a = auxlbls_cat.query(f'labels=="{labels}"')
+    a['values'] = a['values'].astype(float).astype(int).astype(str)
+    a['values'] = a['values'].map(mapping)
+    auxlbls_cat.loc[a.index,'values'] = a['values']
+    return auxlbls_cat
+auxlbls_cat = map_diseases('vascular',vascular_map)
+auxlbls_cat = map_diseases('heart_disease',heart_disease_map)
+
+cerebrovascular = [
+    "Stroke",
+    "Transient Ischemic Attack (TIA)",
+    "Carotid Artery Blockage/Stenosis",
+    "Carotid Artery Surgery or Stent"
+]
+
+peripheral_systemic = [
+    "Abdominal Aortic Aneurysm",
+    "Peripheral Vascular Disease (Blockage/Stenosis, Surgery, or Stent)"
+]
+
+pulmonary = [
+    "Pulmonary Arterial Hypertension",
+    "Pulmonary Hypertension"
+]
+
+CAD_cols = ['Angina (heart chest pains)', 
+            'Coronary Blockage/Stenosis',
+            'Coronary Stent/Angioplasty', 
+            'Heart Attack/Myocardial Infarction',
+            'Heart Bypass Surgery',
+            'High Coronary Calcium Score']
+
+def map_systems(systems, system_name):
+    idx = auxlbls_cat['values'].isin(systems)
+    auxlbls_cat.loc[idx,'values'] = system_name
+    return auxlbls_cat
+
+auxlbls_cat = map_systems(cerebrovascular, 'Cerebrovascular Disease')
+auxlbls_cat = map_systems(peripheral_systemic, 'Peripheral/Systemic Vascular Disease')
+auxlbls_cat = map_systems(pulmonary, 'PH')
+auxlbls_cat = map_systems(CAD_cols, 'CAD')
+# unify labels
+auxlbls_cat.loc[auxlbls_cat['labels'].isin(['vascular','heart_disease']),'labels'] = 'cardiovascular_disease'
+
+cat_summ = auxlbls_cat.query('labels!="sleep_diagnosis2"').groupby(['labels','values'])['HealthCode'].nunique().reset_index().rename(columns={'HealthCode':'n_participants'})
+# compute percentage
+cat_tot = cat_summ.groupby('labels')['n_participants'].transform('sum')
+cat_summ['percentage'] = cat_summ['n_participants'] / cat_tot * 100
+cat_summ.to_csv('temp/cat_summary.csv',index=False)
+
+
+
+# plot the distributions
+for labels in auxlbls_cat['labels'].unique():
+    aux = auxlbls_cat[auxlbls_cat['labels']==labels]
+    aux['timestamps_count'] = aux['timestamps_count'].astype(int)
+    aux['timestamps_count_bins'] = pd.cut(aux['timestamps_count'],bins=[0,1,2,5,10,np.inf], labels=['1','2','3-5','6-10','10+'])
+    chart = alt.Chart(aux).mark_bar().encode(
+        x=alt.X('timestamps_count_bins:O').sort(['1','2','3-5','6-10','10+']),
+        y='count()',
+        color='values:N',
+        tooltip=['timestamps_count_bins','values:N','count()']
+    ).properties(
+        title=f'Distribution of {labels}'
+    ).facet(column='values:N').save(f'figures/{labels}_distribution.html')
+
+
+
+
+# base = alt.Chart(auxlbls_cat[auxlbls_cat['labels']==labels]).encode(
+#     # alt.X("startTime:T", axis=alt.Axis(format="%Y-%B"))
+#     #     .title("Time"),
+#     alt.X("timestamp_values:T", axis=alt.Axis(format="%Y-%B")),
+#     alt.Y("HealthCode:N",sort = 'ascending')                        
+#         .axis(offset=0, ticks=False,labels=False, minExtent=0, domain=False)
+#         .title("Participant")
+# )
+# line_first = base.mark_line().encode(
+#     detail="HealthCode:N",
+#     opacity=alt.value(.8),
+#     color=alt.Color("values:N").scale(range=['#2C75FF','black','red']),
+# )#.transform_filter(alt.FieldOneOfPredicate(field="measurement", oneOf=["first", "last",'withdrawn','deceased']))
+# line_first.save(f'figures/{labels}_distribution.html')
+
+
