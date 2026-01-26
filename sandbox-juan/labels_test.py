@@ -132,7 +132,7 @@ def categorize_bp(row):
         return "Hypertensive_Crisis"
     else:
         return "Uncategorized"
-sys_dia['bp_category'] = sys_dia.apply(categorize_bp, axis=1)
+sys_dia['category'] = sys_dia.apply(categorize_bp, axis=1)
 sys_dia.to_csv('temp/blood_pressure_categories.csv',index=False)
 
 # BMI 
@@ -142,7 +142,7 @@ weight = dflbls.query('labels == "WeightKilograms"').groupby('HealthCode')['valu
 weight['values'] = weight['values'].astype(float)
 bmi = pd.merge(weight, height, on='HealthCode', suffixes=('_weight', '_height'))
 bmi['BMI'] = bmi['values_weight'] / (bmi['values_height'] ** 2)
-bmi['categories'] = pd.cut(bmi['BMI'], 
+bmi['category'] = pd.cut(bmi['BMI'], 
                            bins=[0, 19.9, 24.9, 29.9, 39.9, np.inf], 
                            labels=['Underweight', 'Normal weight', 'Overweight', 'Obesity','Morbid Obesity'])
 bmi = bmi.query('values_height>=1.4 and values_height <=2.1 and values_weight >=40')
@@ -151,7 +151,7 @@ bmi.to_csv('temp/bmi_categories.csv',index=False)
 # sleep_time
 sleep_time = dflbls.query('labels == "sleep_time"').sort_values(by='timestamps',ascending=False).drop_duplicates(subset=['HealthCode']).loc[:,['HealthCode','values']]
 sleep_time['values'] = sleep_time['values'].astype(float)
-sleep_time['sleep_category'] = pd.cut(sleep_time['values'], 
+sleep_time['category'] = pd.cut(sleep_time['values'], 
                                       bins=[0, 6, 7, 9, np.inf], 
                                       labels=['Insufficient', 'Short', 'Normal', 'Too Long'])
 sleep_time.query('values<=12').to_csv('temp/sleep_time_categories.csv',index=False)
@@ -235,10 +235,10 @@ dfvig['values'] = pd.to_numeric(dfvig['values'], errors='coerce')
 dfact = pd.merge(dfactivity.loc[:,['HealthCode','values']], 
                  dfvig.loc[:,['HealthCode','values']],
                    on=['HealthCode'], suffixes=('_phys','_vig'))
-dfact['vig_categories'] = pd.cut(dfact['values_vig'], 
+dfact['vig_category'] = pd.cut(dfact['values_vig'], 
                                  bins=[0, 150, 300, 420, np.inf], 
                                  labels=['Below recommendation','Good','High volume','Athlete training'])
-dfact['phys_categories'] = pd.cut(dfact['values_phys'], 
+dfact['phys_category'] = pd.cut(dfact['values_phys'], 
                                  bins=[0, 2, 4.1, np.inf], 
                                  labels=['Infrequent','Moderate','Frequent'])
 
@@ -248,7 +248,7 @@ dfact2 = dfact[dfact['HealthCode'].isin(sample_ids)].copy()
 alt.Chart(dfact2).mark_circle().encode(x='values_vig:Q',
                                     y='values_phys:N',
                                     detail='HealthCode:N',
-                                    tooltip=['HealthCode:N','vig_categories:N','phys_categories:N']).save('figures/physical_activity_scatter.html')
+                                    tooltip=['HealthCode:N','vig_category:N','phys_category:N']).save('figures/physical_activity_scatter.html')
 dfact.to_csv('temp/physical_activity_categories.csv',index=False)
 
 auxlbls_cat.groupby('labels').aggregate({'timestamps_count':'sum',
