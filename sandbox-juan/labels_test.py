@@ -242,8 +242,11 @@ dfact['phys_categories'] = pd.cut(dfact['values_phys'],
                                  bins=[0, 2, 4.1, np.inf], 
                                  labels=['Infrequent','Moderate','Frequent'])
 
-alt.Chart(dfact).mark_circle().encode(x='vig_categories:N',
-                                    y='vig_categories:N',
+sample_ids = dfact['HealthCode'].sample(n=100, random_state=42).values
+dfact2 = dfact[dfact['HealthCode'].isin(sample_ids)].copy() 
+
+alt.Chart(dfact2).mark_circle().encode(x='values_vig:Q',
+                                    y='values_phys:N',
                                     detail='HealthCode:N',
                                     tooltip=['HealthCode:N','vig_categories:N','phys_categories:N']).save('figures/physical_activity_scatter.html')
 dfact.to_csv('temp/physical_activity_categories.csv',index=False)
@@ -374,8 +377,7 @@ cat_summ = auxlbls_cat.query('labels!="sleep_diagnosis2"').groupby(['labels','va
 cat_tot = cat_summ.groupby('labels')['n_participants'].transform('sum')
 cat_summ['percentage'] = cat_summ['n_participants'] / cat_tot * 100
 cat_summ.to_csv('temp/cat_summary.csv',index=False)
-
-
+auxlbls_cat.query('labels!="sleep_diagnosis2"').to_csv('temp/cat_final.csv',index=False)
 
 # plot the distributions
 for labels in auxlbls_cat['labels'].unique():
