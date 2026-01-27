@@ -5,10 +5,25 @@ from typing import Generator, Dict
 import pandas_gbq as pdg
 import logging
 import time
+import re
 
 # Simplified Logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
+
+prefixes = [
+    "HealthObservations_HKQuantityTypeIdentifier",
+    "HealthObservations_HKCategoryTypeIdentifier",
+    "HealthObservations_com.apple.SensorKit.",
+    "HealthObservations_HKDataTypeIdentifier",
+    "HealthObservations_HKWorkoutTypeIdentifier",
+    "HealthObservations_MHC"
+]
+pattern = re.compile(f"^({'|'.join(map(re.escape, prefixes))})")
+
+def clean_metric(metric):
+    clean = pattern.sub('', metric)
+    return clean if clean else 'Workout'
 
 class FirestoreStreamer:
     """Focuses solely on streaming data out of Firestore efficiently."""
@@ -54,7 +69,7 @@ class FirestoreStreamer:
                     yield {
                         **period,
                         'user_id': user_id,
-                        'metric': sub.id,
+                        'metric': clean_metric(sub.id),
                         'value': data.get('valueQuantity', {}).get('value'),
                         'unit': data.get('valueQuantity', {}).get('unit'),
                         'value_str': data.get('valueString')
@@ -90,12 +105,13 @@ def main():
 
 
     # Final Save
-    pdg.to_gbq(pd.DataFrame(users_accumulator), "myheart_counts_development.users",
+    pdg.to_gbq(pd.DataFrame(users_accumulator), "myheart_counts_development.firebase_data_monitoring.users",
                 project_id="myheart-counts-development",
                 if_exists="append")
-    pdg.to_gbq(pd.DataFrame(obs_accumulator), "myheart_counts_development.observations",
+    pdg.to_gbq(pd.DataFrame(obs_accumulator), "myheart_counts_development.firebase_data_monitoring.observations",
                 project_id="myheart-counts-development",
-                if_exists="append")
+                if_exists="append",
+                chunksize=1000)
     pd.DataFrame(users_accumulator).to_csv("temp/users_final2.csv", index=False)
     pd.DataFrame(obs_accumulator).to_csv("temp/obs_final2.csv", index=False)
 
