@@ -167,6 +167,7 @@ class FirestoreDataExtractor:
         user_count = 0
         
         while True:
+            tic = time.time()
             # Fetch batch of users
             query = users_query.limit(user_batch_size)
             if last_user_doc:
@@ -200,6 +201,8 @@ class FirestoreDataExtractor:
                 time.sleep(self.rate_limit_delay * 2)
             else:
                 break
+            tac = time.time()
+            logger.info(f"Finished batch in {tac - tic:.2f} seconds")
         
         # Create final dataframes
         user_df = pd.DataFrame(users_data)
