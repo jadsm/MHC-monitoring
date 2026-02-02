@@ -40,41 +40,47 @@ types = {
     'SystolicBloodPressure': 'float'
 }
 
-# Read JSON string from a file
-with open('source_data/labels_enrollment_info.json', 'r') as f:
-    df = pd.DataFrame(json.loads(f.read())).T
+reload_flag = False
+if reload_flag:
+    # Read JSON string from a file
+    with open('source_data/labels_enrollment_info.json', 'r') as f:
+        df = pd.DataFrame(json.loads(f.read())).T
 
-with open('source_data/labels_labels.json', 'r') as f:
-    dflbls,auxlbls_val,auxlbls_cat = pd.DataFrame(),pd.DataFrame(),pd.DataFrame()
-    aux = json.loads(f.read())
-    for k,v in aux.items():
-        df2 = pd.DataFrame(v).T.explode(column=['timestamps','values'])
-        df2 = df2.reset_index().rename(columns={'index':'HealthCode'})
-        df2['labels'] = k
-        dflbls = pd.concat([dflbls, df2], ignore_index=True)
-        # summary
-        if types[k] == 'boolean' or types[k] == 'categorical':
-            aux2 = df2.groupby(['HealthCode','values']).aggregate({'timestamps':['count','min','max']} ).reset_index()   
-            aux2.columns = [c.strip('_') for c in aux2.columns.map('_'.join)]
-            aux2['labels'] = k
-            auxlbls_cat = pd.concat([auxlbls_cat, aux2], ignore_index=True)
-        elif types[k] == 'float' or types[k] == 'ordinal':
-            df2['values'] = pd.to_numeric(df2['values'], errors='coerce')
-            # add 25% and 75% quantiles
-            aux2 = df2.groupby('HealthCode').aggregate({'timestamps':['count','min','max'],
-                                    'values':['mean','median','max','min',lambda x: x.quantile(0.25),lambda x: x.quantile(0.75)]}).reset_index()
-            aux2.columns = [c.strip('_') for c in aux2.columns.map('_'.join)]
-        
-            aux2['labels'] = k
-            auxlbls_val = pd.concat([auxlbls_val, aux2], ignore_index=True)
+    with open('source_data/labels_labels.json', 'r') as f:
+        dflbls,auxlbls_val,auxlbls_cat = pd.DataFrame(),pd.DataFrame(),pd.DataFrame()
+        aux = json.loads(f.read())
+        for k,v in aux.items():
+            df2 = pd.DataFrame(v).T.explode(column=['timestamps','values'])
+            df2 = df2.reset_index().rename(columns={'index':'HealthCode'})
+            df2['labels'] = k
+            dflbls = pd.concat([dflbls, df2], ignore_index=True)
+            # summary
+            if types[k] == 'boolean' or types[k] == 'categorical':
+                aux2 = df2.groupby(['HealthCode','values']).aggregate({'timestamps':['count','min','max']} ).reset_index()   
+                aux2.columns = [c.strip('_') for c in aux2.columns.map('_'.join)]
+                aux2['labels'] = k
+                auxlbls_cat = pd.concat([auxlbls_cat, aux2], ignore_index=True)
+            elif types[k] == 'float' or types[k] == 'ordinal':
+                df2['values'] = pd.to_numeric(df2['values'], errors='coerce')
+                # add 25% and 75% quantiles
+                aux2 = df2.groupby('HealthCode').aggregate({'timestamps':['count','min','max'],
+                                        'values':['mean','median','max','min',lambda x: x.quantile(0.25),lambda x: x.quantile(0.75)]}).reset_index()
+                aux2.columns = [c.strip('_') for c in aux2.columns.map('_'.join)]
+            
+                aux2['labels'] = k
+                auxlbls_val = pd.concat([auxlbls_val, aux2], ignore_index=True)
 
-auxlbls_cat.to_csv('temp/cat.csv',index=False)
-auxlbls_val.to_csv('temp/val.csv',index=False)
+    auxlbls_cat.to_csv('temp/cat.csv',index=False)
+    auxlbls_val.to_csv('temp/val.csv',index=False)
+else: 
+    auxlbls_cat = pd.read_csv('temp/cat.csv')
+    auxlbls_val = pd.read_csv('temp/val.csv')
 
 # Analyse values first
 
 auxlbls_val.loc[:,[ 'values_mean', 'values_median', 'values_max', 'values_min',
        'values_<lambda_0>', 'values_<lambda_1>','labels']].groupby('labels').mean()
+
 #                         values_mean  values_median  values_max  values_min  values_25%  values_75%
 # labels                                                                                                          
 # DiastolicBloodPressure    76.389566      76.399505   77.817208   74.971691          75.753715          77.011551
@@ -98,7 +104,36 @@ auxlbls_val.loc[:,[ 'values_mean', 'values_median', 'values_max', 'values_min',
 # sleep_time1                7.062555       7.060119    7.125603    7.004373           7.033892           7.089311
 # vigorous_act              73.407834      72.915853   78.833447   69.044003          70.965898          75.419630
 
+auxlbls_val.loc[:,[ 'labels','timestamps_count']].groupby('labels').agg(['mean','median','max'])
+
+#   timestamps_count            
+#                                    mean median  max
+# labels                                             
+# DiastolicBloodPressure         2.393995    1.0  623
+# GoSleepTime                    1.869028    2.0  280
+# Hdl                            2.360074    1.0  624
+# HeightCentimeters              1.870464    2.0  280
+# Ldl                            2.243389    1.0  623
+# SystolicBloodPressure          2.386979    1.0  624
+# TotalCholesterol               2.396498    1.0  624
+# WakeUpTime                     1.869884    2.0  280
+# WeightKilograms                1.870464    2.0  280
+# atwork                         1.215993    1.0   29
+# feel_worthwhile1               2.035947    2.0  116
+# feel_worthwhile2               2.036036    2.0  116
+# feel_worthwhile3               2.035324    2.0  116
+# feel_worthwhile4               2.032847    2.0  116
+# happiness                     10.050204    4.0  137
+# phys_activity                  1.271606    1.0   56
+# satisfiedwith_life             2.037136    2.0  116
+# sleep_time                     1.269979    1.0   56
+# sleep_time1                    1.269803    1.0   56
+# vigorous_act                   1.267454    1.0   56
+
 # now get the labels one by one
+
+# get the numeric values first
+auxlbls_val.query('labels in ("Hdl","Ldl","TotalCholesterol","WeightKilograms","sleep_time","vigorous_act")').loc[:,['HealthCode','labels','values_mean', 'values_median', 'values_max', 'values_min']].to_csv('temp/numeric_values.csv',index=False)
 
 # blood pressure categories
 
@@ -174,7 +209,7 @@ go_sleep_time['category'] = pd.cut(go_sleep_time['hour'],
                                                 labels=['Late Sleeper','Very Late Sleeper','Shift Worker','Early Sleeper', 'Normal Sleeper', 'Late Sleeper'])
 go_sleep_time.to_csv('temp/go_sleep_time_categories.csv',index=False)
 
-# phychological factors
+# psychological factors
 #                       count      mean       std  min  25%  50%  75%   max
 # labels                                                                   
 # feel_worthwhile1    62188.0  7.488197  2.038789  0.0  7.0  8.0  9.0  10.0
@@ -227,29 +262,31 @@ dfhappiness_static.to_csv('temp/happiness_static_categories.csv',index=False)
 
 # phys_activity              3.026438       3.025707    3.096056    2.956731           2.993261           3.059779
 # vigorous_act             73.407834      72.915853   78.833447   69.044003          70.965898          75.419630
-dfactivity = dflbls.query('labels in ["phys_activity"]').sort_values(by='timestamps',ascending=False).drop_duplicates(subset=['HealthCode','timestamps']).copy()
+dfactivity = dflbls.query('labels in ["phys_activity"]').sort_values(by='timestamps',ascending=False).copy()
 dfactivity['values'] = pd.to_numeric(dfactivity['values'], errors='coerce')
-dfvig = dflbls.query('labels in ["vigorous_act"]').sort_values(by='timestamps',ascending=False).drop_duplicates(subset=['HealthCode','timestamps']).copy()
+dfvig = dflbls.query('labels in ["vigorous_act"]').sort_values(by='timestamps',ascending=False).copy()
 dfvig['values'] = pd.to_numeric(dfvig['values'], errors='coerce')
 # merge
-dfact = pd.merge(dfactivity.loc[:,['HealthCode','values']], 
-                 dfvig.loc[:,['HealthCode','values']],
-                   on=['HealthCode'], suffixes=('_phys','_vig'))
-dfact['vig_category'] = pd.cut(dfact['values_vig'], 
-                                 bins=[0, 150, 300, 420, np.inf], 
+# dfact = pd.merge(dfactivity.loc[:,['HealthCode','values']], 
+#                  dfvig.loc[:,['HealthCode','values']],
+#                    on=['HealthCode'], suffixes=('_phys','_vig'))
+dfvig['labels'] = pd.cut(dfvig['values'], 
+                                 bins=[-1, 150, 300, 420, np.inf], 
                                  labels=['Below recommendation','Good','High volume','Athlete training'])
-dfact['phys_category'] = pd.cut(dfact['values_phys'], 
-                                 bins=[0, 2, 4.1, np.inf], 
+dfactivity['labels'] = pd.cut(dfactivity['values'], 
+                                 bins=[-1, 2, 4.1, np.inf], 
                                  labels=['Infrequent','Moderate','Frequent'])
 
-sample_ids = dfact['HealthCode'].sample(n=100, random_state=42).values
-dfact2 = dfact[dfact['HealthCode'].isin(sample_ids)].copy() 
+# sample_ids = dfact['HealthCode'].sample(n=100, random_state=42).values
+# dfact2 = dfact[dfact['HealthCode'].isin(sample_ids)].copy() 
 
-alt.Chart(dfact2).mark_circle().encode(x='values_vig:Q',
-                                    y='values_phys:N',
-                                    detail='HealthCode:N',
-                                    tooltip=['HealthCode:N','vig_category:N','phys_category:N']).save('figures/physical_activity_scatter.html')
-dfact.to_csv('temp/physical_activity_categories.csv',index=False)
+# alt.Chart(dfact2).mark_circle().encode(x='values_vig:Q',
+#                                     y='values_phys:N',
+#                                     detail='HealthCode:N',
+#                                     tooltip=['HealthCode:N','vig_category:N','phys_category:N']).save('figures/physical_activity_scatter.html')
+# dfact.to_csv('temp/physical_activity_categories.csv',index=False)
+dfvig.to_csv('temp/vigorous_categories.csv',index=False)
+dfactivity.to_csv('temp/physical_activity_categories.csv',index=False)
 
 auxlbls_cat.groupby('labels').aggregate({'timestamps_count':'sum',
                                          'HealthCode':'nunique'}).sort_values('HealthCode',ascending=False)
