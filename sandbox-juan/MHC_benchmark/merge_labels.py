@@ -27,6 +27,9 @@ df_final = pd.concat([df_final, df], axis=0, ignore_index=True)
 df_final.to_csv('temp/merged_categorical_labels.csv', index=False)
 aux = df_final.groupby(['label_type','category'])['HealthCode'].nunique().reset_index()
 auxt = aux.groupby(['label_type'])['HealthCode'].sum()
+aux = aux.merge(auxt,on='label_type',suffixes=('','_total'), how='left',)
+aux['proportion'] = aux['HealthCode']/aux['HealthCode_total']*100
+aux.drop(columns=['HealthCode_total'], inplace=True)
 aux.to_csv('temp/label_counts.csv',index=False)
 
 
@@ -44,4 +47,4 @@ df_final.to_csv('temp/merged_numeric_labels.csv', index=False)
 
 
 df_final.groupby(['labels']).agg({'HealthCode':'nunique',
-                                  'values':['mean','median','std','min','max']}).to_csv('temp/value_counts.csv',index=False)
+                                  'values':['mean','median','std','min','max']}).to_csv('temp/value_counts.csv',index=True)

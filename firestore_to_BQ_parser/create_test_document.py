@@ -1,8 +1,9 @@
+# this is a file to add a new document to the firestore database for testing purposes. It will be used to test the parser and the export to BQ. It will be added to the same user as the existing documents, with a unique subcollection name and a unique document ID. The document will have the same structure as the existing documents, but with different values. This will allow us to test that the parser can handle new documents and that the export to BQ can handle new documents.
+
 import pandas as pd
 import firebase_admin
 from firebase_admin import credentials, firestore
 from typing import Generator, Dict
-import pandas_gbq as pdg
 import logging
 import time
 import re
@@ -75,45 +76,36 @@ class FirestoreStreamer:
                         'value_str': data.get('valueString')
                     }
 
-def main():
-    creds = "/home/juan/Desktop/Juan/code/.creds/creds-myheart-counts-development.json"
-    streamer = FirestoreStreamer(creds)
-    
-    users_accumulator = []
-    obs_accumulator = []
-    
-    # Process users as a stream
-    user_col = streamer.db.collection("users")
-    for user_doc in streamer.stream_collection(user_col, batch_size=10):
-        tic = time.time()
-        user_id = user_doc.id
-        logger.info(f"Processing user: {user_id}")
-        
-        # Add User Data
-        users_accumulator.append({"user_id": user_id, **user_doc.to_dict()})
-        
-        # Add Observations
-        for obs in streamer.get_user_observations(user_id):
-            obs_accumulator.append(obs)
-            
-        # Periodic Checkpointing (e.g., every 50 users)
-        if len(users_accumulator) % 5 == 0:
-            pd.DataFrame(obs_accumulator).to_csv(f"temp/obs_checkpoint.csv", index=False)
-            pd.DataFrame(users_accumulator).to_csv(f"temp/users_checkpoint.csv", index=False)
-        tac = time.time()
-        logger.info(f"Finished user: {user_id} in {tac - tic:.2f} seconds")
-
-
-    # Final Save
-    pdg.to_gbq(pd.DataFrame(users_accumulator), "myheart_counts_development.firebase_data_monitoring.users",
-                project_id="myheart-counts-development",
-                if_exists="append")
-    pdg.to_gbq(pd.DataFrame(obs_accumulator), "myheart_counts_development.firebase_data_monitoring.observations",
-                project_id="myheart-counts-development",
-                if_exists="append",
-                chunksize=1000)
-    pd.DataFrame(users_accumulator).to_csv("temp/users_final2.csv", index=False)
-    pd.DataFrame(obs_accumulator).to_csv("temp/obs_final2.csv", index=False)
 
 if __name__ == "__main__":
-    main()
+    creds = "/home/juan/Desktop/Juan/code/.creds/creds-myheart-counts-development.json"
+    streamer = FirestoreStreamer(creds)
+    # # get one doc
+    # doc = streamer.db.collection("users").document("PmkvUwmPOaYOvlbT4AtXsxKHXjM2").get()
+    # # write another document to firestore - the exact user_doc as a test
+    # test_doc_ref = streamer.db.collection("users").document("PmkvUwmPOaYOvlbT4AtXsxKHXjM2")
+    # test_doc_ref.set(doc.to_dict())  # Write the first user document as a test   
+
+
+
+    # Reference the specific subcollection under the user
+    obs_subcollection = "HealthObservations_HKQuantityTypeIdentifierStepCount"
+    user_id = "PmkvUwmPOaYOvlbT4AtXsxKHXjM2"
+
+    new_observation = {
+        "effectivePeriod": {
+            "start": "2023-10-27T10:00:00Z",
+            "end": "2023-10-27T10:15:00Z"
+        },
+        "valueQuantity": {
+            "value": 500,
+            "unit": "steps"
+        },
+        
+        "issued": pd.Timestamp.now()  # Track when this observation was added
+        
+    }
+
+    # .add() automatically creates a new document with a unique ID
+    streamer.db.collection("users").document(user_id)\
+        .collection(obs_subcollection).add(new_observation)
