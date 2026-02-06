@@ -61,70 +61,68 @@ def main():
     obs_accumulator = []
     users_processed = 0
     users_with_updates = 0
+    new_observations = 0
     
-    # Process all users
+    # check for users first
     user_col = streamer.db.collection("users")
     for user_doc in streamer.stream_collection(user_col, batch_size=10):
         tic = time.time()
         user_id = user_doc.id
         users_processed += 1
         
-        # Quick check: does this user have any new observations?
-        updated_count = streamer.count_updated_observations(user_id, last_sync_time)
-        
-        if updated_count == 0:
-            logger.info(f"Skipping user {user_id} - no new observations")
-            continue
-        
-        logger.info(f"Processing user: {user_id} ({updated_count} new observations)")
-        users_with_updates += 1
-        
         # is user_id in bigquery?
         if not user_id in streamer.users_in_BQ:
             # Add User Data
             users_accumulator.append({"user_id": user_id, **user_doc.to_dict(),'synced_at': sync_start_time})
-        
-        # Add only new observations (filtered by 'issued' timestamp)
-        obs_count = 0
-        for obs in streamer.get_user_observations(user_id, last_sync_time):
-            obs_accumulator.append(obs)
-            obs_count += 1
-        
-        logger.info(f"  → Collected {obs_count} observations")
-        
-        # Periodic Checkpointing
-        if local_flag and users_with_updates % 5 == 0:
-            pd.DataFrame(obs_accumulator).to_csv(f"temp/obs_checkpoint.csv", index=False)
-            pd.DataFrame(users_accumulator).to_csv(f"temp/users_checkpoint.csv", index=False)
-            logger.info(f"Checkpoint saved: {len(users_accumulator)} users, {len(obs_accumulator)} observations")
+            logger.info(f"Added user: {user_id} (not in BigQuery)")
+            users_with_updates += 1
         
         tac = time.time()
         logger.info(f"Finished user: {user_id} in {tac - tic:.2f} seconds")
-    
-        if users_accumulator:
-            # Save to BigQuery
-            df = pd.DataFrame(users_accumulator)
-            df['comorbidities'] = df['comorbidities'].astype(str)
+        
+    if users_accumulator:
+        # Save to BigQuery
+        df = pd.DataFrame(users_accumulator)
+        df['comorbidities'] = df['comorbidities'].astype(str)
+        pdg.to_gbq(df, "myheart_counts_development.users3",
+                    project_id="myheart-counts-development",
+                    if_exists="replace",
+                    table_schema=streamer.users_schema)
+        logger.info(f"✓ Uploaded {len(df)} users to BigQuery")
+        users_accumulator = []  # Clear after upload
+
+    # check for observations after
+    healthobservation_cols = streamer.db.collection("variables").document("healthobservation_cols").get().to_dict().get("cols", [])
+    for heathobservation_col in healthobservation_cols:
+        tic = time.time()
+        try:
+            # Add only new observations (filtered by 'issued' timestamp)
+            obs_count = 0
+            for obs in streamer.get_observations(heathobservation_col, last_sync_time):        
+                obs_accumulator.append(obs)
+                obs_count += 1
             
-            pdg.to_gbq(df, "myheart_counts_development.users3",
-                        project_id="myheart-counts-development",
-                        if_exists="append")
-            logger.info(f"✓ Uploaded {len(df)} users to BigQuery")
-            users_accumulator = []  # Clear after upload
-            
-        if obs_accumulator:
-            obs_df = pd.DataFrame(obs_accumulator)
-            # Add sync timestamp for tracking
-            obs_df['synced_at'] = pd.Timestamp.now()
-            
-            pdg.to_gbq(obs_df, "myheart_counts_development.observations3",
-                        project_id="myheart-counts-development",
-                        if_exists="append",
-                        chunksize=1000)
-            logger.info(f"✓ Uploaded {len(obs_df)} observations to BigQuery")
-            new_observations = len(obs_accumulator)
-            obs_accumulator = []  # Clear after upload
-            
+            logger.info(f"{heathobservation_col}  → Collected {obs_count} observations")        
+            tac = time.time()
+            logger.info(f"Finished healthobservation: {heathobservation_col} in {tac - tic:.2f} seconds")
+                    
+            if obs_accumulator:
+                obs_df = pd.DataFrame(obs_accumulator)
+                # Add sync timestamp for tracking
+                obs_df['synced_at'] = pd.Timestamp.now()
+                
+                pdg.to_gbq(obs_df, "myheart_counts_development.observations3",
+                            project_id="myheart-counts-development",
+                            if_exists="replace",
+                            chunksize=1000,
+                            table_schema=streamer.observations_schema)
+                logger.info(f"✓ Uploaded {len(obs_df)} observations to BigQuery")
+                new_observations += len(obs_accumulator)
+                obs_accumulator = []  # Clear after upload
+        except Exception as e:
+            logger.error(f"Error processing {heathobservation_col}: {e}")
+            continue
+        
         # add info to logs
         logger.info(f"\n{'='*60}")
         logger.info(f"Sync Summary:")

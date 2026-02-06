@@ -15,6 +15,49 @@ prefixes = [
     "HealthObservations_HKWorkoutTypeIdentifier",
     "HealthObservations_MHC"
 ]
+
+users_schema  = [
+    {'name': 'user_id', 'type': 'STRING'},
+    {'name': 'educationUS', 'type': 'STRING'},
+    {'name': 'futureStudies', 'type': 'BOOL'},
+    {'name': 'comorbidities', 'type': 'STRING'}, # Stored as string since BQ doesn't have a generic 'object'
+    {'name': 'preferredNotificationTime', 'type': 'STRING'},
+    {'name': 'householdIncomeUS', 'type': 'INT64'},
+    {'name': 'mhcGenderIdentity', 'type': 'INT64'},
+    {'name': 'disabled', 'type': 'BOOL'},
+    {'name': 'lastSignedConsentDate', 'type': 'TIMESTAMP'},
+    {'name': 'bloodType', 'type': 'INT64'},
+    {'name': 'timeZone', 'type': 'STRING'},
+    {'name': 'usRegion', 'type': 'STRING'},
+    {'name': 'dateOfBirth', 'type': 'TIMESTAMP'},
+    {'name': 'mostRecentOnboardingStep', 'type': 'STRING'},
+    {'name': 'raceEthnicity', 'type': 'INT64'},
+    {'name': 'preferredWorkoutTypes', 'type': 'STRING'},
+    {'name': 'fcmToken', 'type': 'STRING'},
+    {'name': 'biologicalSexAtBirth', 'type': 'INT64'},
+    {'name': 'heightInCM', 'type': 'FLOAT64'},
+    {'name': 'stageOfChange', 'type': 'STRING'},
+    {'name': 'lastSignedConsentVersion', 'type': 'STRING'},
+    {'name': 'latinoStatus', 'type': 'INT64'},
+    {'name': 'dateOfEnrollment', 'type': 'TIMESTAMP'},
+    {'name': 'didOptInToTrial', 'type': 'BOOL'},
+    {'name': 'language', 'type': 'STRING'},
+    {'name': 'lastActiveDate', 'type': 'TIMESTAMP'},
+    {'name': 'participantGroup', 'type': 'INT64'},
+    {'name': 'weightInKG', 'type': 'FLOAT64'},
+    {'name': 'synced_at', 'type': 'TIMESTAMP'}
+]
+
+observations_schema = [
+    {'name': 'user_id', 'type': 'STRING'},
+    {'name': 'metric', 'type': 'STRING'},
+    {'name': 'value', 'type': 'FLOAT64'},
+    {'name': 'unit', 'type': 'STRING'},
+    {'name': 'value_str', 'type': 'STRING'},
+    {'name': 'issued', 'type': 'TIMESTAMP'},
+    {'name': 'synced_at', 'type': 'TIMESTAMP'}
+]
+
 pattern = re.compile(f"^({'|'.join(map(re.escape, prefixes))})")
 
 def clean_metric(metric):
@@ -30,7 +73,8 @@ class FirestoreStreamer:
         self.db = firestore.client()
         query = f"SELECT user_id FROM `myheart_counts_development.users3`"
         self.users_in_BQ = tuple(pdg.read_gbq(query, project_id="myheart-counts-development", dialect="standard")['user_id'])
-        
+        self.users_schema = users_schema
+        self.observations_schema = observations_schema
     
     def initialize_firebase(self):
         if not firebase_admin._apps:
@@ -91,64 +135,31 @@ class FirestoreStreamer:
             last_doc = docs[-1]
             time.sleep(0.1)
     
-    def get_user_observations(self, user_id: str, last_sync_time: Optional[datetime] = None) -> Generator[Dict, None, None]:
+    def get_observations(self, heathobservation_col: str, last_sync_time: Optional[datetime] = None) -> Generator[Dict, None, None]:
         """Streams health observations for a single user, filtering by issued timestamp."""
-        user_ref = self.db.collection("users").document(user_id)
-        
-        for sub in user_ref.collections():
-            if not sub.id.startswith("HealthObservations"):
-                continue
-            
-            # Build query with 'issued' filter for new documents
-            query = sub
-            if last_sync_time:
-                query = query.where('issued', '>', last_sync_time)
-            
-            # Paginate through filtered results
-            last_doc = None
-            while True:
-                paginated_query = query.limit(500)
-                if last_doc:
-                    paginated_query = paginated_query.start_after(last_doc)
-                
-                docs = list(paginated_query.stream())
-                if not docs:
-                    break
-                
-                for doc in docs:
-                    data = doc.to_dict()
-                    period = data.get('effectivePeriod')
-                    issued = data.get('issued')
-                    
-                    if period and isinstance(period, dict):
-                        yield {
-                            **period,
-                            'user_id': user_id,
-                            'metric': clean_metric(sub.id),
-                            'value': data.get('valueQuantity', {}).get('value'),
-                            'unit': data.get('valueQuantity', {}).get('unit'),
-                            'value_str': data.get('valueString'),
-                            'issued': issued  # Include 'issued' timestamp for tracking
-                        }
-                
-                last_doc = docs[-1]
-                time.sleep(0.05)
+        # pagination was removed - might consider re-instantiating it for scalability if needed, but for now we rely on Firestore's internal optimizations for collection_group queries with proper indexing
+        query = self.db.collection_group(heathobservation_col)
     
-    def count_updated_observations(self, user_id: str, last_sync_time: Optional[datetime] = None) -> int:
-        """Quick count of how many new observations were issued for a user."""
-        user_ref = self.db.collection("users").document(user_id)
-        total = 0
+        if last_sync_time:
+            query = query.where("issued", ">", last_sync_time).order_by("issued")
         
-        for sub in user_ref.collections():
-            if not sub.id.startswith("HealthObservations"):
-                continue
+        docs = query.stream()
+
+        for doc in docs:
+            user_id = doc.reference.parent.parent.id
+            data = doc.to_dict()
+            period = data.get('effectivePeriod')
+            issued = data.get('issued')
             
-            query = sub
-            if last_sync_time:
-                query = query.where('issued', '>', last_sync_time)
-            
-            # Count without fetching all data
-            count_docs = list(query.select([]).limit(1000).stream())
-            total += len(count_docs)
+            if period and isinstance(period, dict):
+                yield {
+                    **period,
+                    'user_id': user_id,
+                    'metric': clean_metric(heathobservation_col),
+                    'value': data.get('valueQuantity', {}).get('value'),
+                    'unit': data.get('valueQuantity', {}).get('unit'),
+                    'value_str': data.get('valueString'),
+                    'issued': issued  # Include 'issued' timestamp for tracking
+                }
         
-        return total
+        #time.sleep(0.05)
