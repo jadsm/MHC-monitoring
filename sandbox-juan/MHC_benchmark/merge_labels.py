@@ -32,7 +32,6 @@ aux['proportion'] = aux['HealthCode']/aux['HealthCode_total']*100
 aux.drop(columns=['HealthCode_total'], inplace=True)
 aux.to_csv('temp/label_counts.csv',index=False)
 
-
 # handle numeric labels
 files = ['numeric_values.csv', 
           'bmi_categories.csv']
