@@ -42,7 +42,7 @@ if 0 in compute_flag:
         'SystolicBloodPressure': 'float'
     }
 
-    reload_flag = False
+    reload_flag = True
     if reload_flag:
         # Read JSON string from a file
         with open('source_data/labels_enrollment_info.json', 'r') as f:
@@ -74,10 +74,12 @@ if 0 in compute_flag:
 
         auxlbls_cat.to_csv('temp/cat.csv',index=False)
         auxlbls_val.to_csv('temp/val.csv',index=False)
+        dflbls.to_csv('temp/dfalllbls.csv',index=False)
     else: 
         auxlbls_cat = pd.read_csv('temp/cat.csv')
         auxlbls_val = pd.read_csv('temp/val.csv')
-
+        dflbls = pd.read_csv('temp/dfalllbls.csv')
+        
     # Analyse values first
 
     auxlbls_val.loc[:,[ 'values_mean', 'values_median', 'values_max', 'values_min',
@@ -133,12 +135,10 @@ if 0 in compute_flag:
     # vigorous_act                   1.267454    1.0   56
 
     # now get the labels one by one
-
-    # get the numeric values first
+    # get the numeric values first - 
     auxlbls_val.query('labels in ("Hdl","Ldl","TotalCholesterol","WeightKilograms","sleep_time","vigorous_act")').loc[:,['HealthCode','labels','values_mean', 'values_median', 'values_max', 'values_min']].to_csv('temp/numeric_values.csv',index=False)
 
     # blood pressure categories
-
     dia = dflbls.query('labels == "DiastolicBloodPressure"').sort_values(by='timestamps',ascending=False).drop_duplicates(subset=['HealthCode']).loc[:,['HealthCode','values']]
     dia['values'] = dia['values'].astype(float)
 
@@ -170,6 +170,7 @@ if 0 in compute_flag:
         else:
             return "Uncategorized"
     sys_dia['category'] = sys_dia.apply(categorize_bp, axis=1)
+    sys_dia.loc[:,['HealthCode','values_systolic']].to_csv('temp/blood_pressure_values.csv',index=False)
     sys_dia.to_csv('temp/blood_pressure_categories.csv',index=False)
 
     # BMI 
@@ -178,8 +179,8 @@ if 0 in compute_flag:
     weight = dflbls.query('labels == "WeightKilograms"').groupby('HealthCode')['values'].max().reset_index()
     weight['values'] = weight['values'].astype(float)
     bmi = pd.merge(weight, height, on='HealthCode', suffixes=('_weight', '_height'))
-    bmi['BMI'] = bmi['values_weight'] / (bmi['values_height'] ** 2)
-    bmi['category'] = pd.cut(bmi['BMI'], 
+    bmi['BMI_values'] = bmi['values_weight'] / (bmi['values_height'] ** 2)
+    bmi['category'] = pd.cut(bmi['BMI_values'], 
                             bins=[0, 19.9, 24.9, 29.9, 39.9, np.inf], 
                             labels=['Underweight', 'Normal weight', 'Overweight', 'Obesity','Morbid Obesity'])
     bmi = bmi.query('values_height>=1.4 and values_height <=2.1 and values_weight >=40')
@@ -410,12 +411,6 @@ if 0 in compute_flag:
     auxlbls_cat = map_systems(CAD_cols, 'CAD')
     # unify labels
     auxlbls_cat.loc[auxlbls_cat['labels'].isin(['vascular','heart_disease']),'labels'] = 'cardiovascular_disease'
-
-    cat_summ = auxlbls_cat.query('labels!="sleep_diagnosis2"').groupby(['labels','values'])['HealthCode'].nunique().reset_index().rename(columns={'HealthCode':'n_participants'})
-    # compute percentage
-    cat_tot = cat_summ.groupby('labels')['n_participants'].transform('sum')
-    cat_summ['percentage'] = cat_summ['n_participants'] / cat_tot * 100
-    cat_summ.to_csv('temp/cat_summary.csv',index=False)
     auxlbls_cat.query('labels!="sleep_diagnosis2"').to_csv('temp/cat_final.csv',index=False)
 
     # plot the distributions
@@ -439,14 +434,25 @@ if 1 in compute_flag:
     'blood_pressure_categories.csv',
         'wake_time_categories.csv', 
             'go_sleep_time_categories.csv', 
-            'bmi_categories.csv']
+            'bmi_categories.csv',
+            'happiness_static_categories.csv']
 
     # merge all labels - categories
     df_final = pd.DataFrame()
     for file in files:
+        print(file)
         df = pd.read_csv('temp/'+file).loc[:,['HealthCode','category']]
         df['label_type'] = file.replace('_categories.csv','')
         df_final = pd.concat([df_final, df], axis=0, ignore_index=True)
+
+    labelmappings = {'bmi':'BMI_categories',
+                        'wake_time':'WakeUpTime_categories',
+                        'go_sleep_time':'GoSleepTime_categories',
+                        'blood_pressure':'blood_pressure_categories',
+                        'sleep_time':'sleep_time_categories',
+                        'happiness_static':'happiness_categories'
+                        }
+    df_final['label_type'] = df_final['label_type'].map(labelmappings)
 
     # handle exceptions
     # file = 'physical_activity_categories.csv'
@@ -469,19 +475,25 @@ if 1 in compute_flag:
 
     # handle numeric labels
     files = ['numeric_values.csv', 
-            'bmi_categories.csv']
+            'bmi_categories.csv',
+            'blood_pressure_values.csv']
     df = pd.read_csv('temp/'+files[0])
     df2 = pd.read_csv('temp/'+files[1])
+    df3 = pd.read_csv('temp/'+files[2])
     df2.rename(columns={'BMI':'values'}, inplace=True)
-    df2['labels'] = 'BMI'
+    df2['labels'] = 'BMI_values'
+    df2.rename(columns={'BMI_values':'values'},inplace=True)
+    df3['labels'] = 'SystolicBloodPressure'
+    df3.rename(columns={'values_systolic':'values'},inplace=True)
     df.rename(columns={'values_median':'values'}, inplace=True)
     df_final = pd.concat([df.loc[:,['HealthCode','values','labels']],
-                        df2.loc[:,['HealthCode','values','labels']]], axis=0, ignore_index=True)
+                        df2.loc[:,['HealthCode','values','labels']],
+                        df3.loc[:,['HealthCode','values','labels']]], axis=0, ignore_index=True)
     df_final.to_csv('temp/merged_numeric_labels.csv', index=False)
 
 
-    df_final.groupby(['labels']).agg({'HealthCode':'nunique',
-                                    'values':['mean','median','std','min','max']}).to_csv('temp/value_counts.csv',index=True)
+    # df_final.groupby(['labels']).agg({'HealthCode':'nunique',
+    #                                 'values':['mean','median','std','min','max']}).to_csv('temp/value_counts.csv',index=True)
 
 
 if 2 in compute_flag:
@@ -489,11 +501,18 @@ if 2 in compute_flag:
 
     # numeric labels - 'temp/merged_numeric_labels.csv'
     dfn = pd.read_csv('temp/merged_numeric_labels.csv')
+    dfn.groupby('labels')['values'].agg(['nunique','mean','median','std','min','max']).to_csv('temp/value_counts.csv',index=True)
 
     # categorical labels - 'temp/merged_categorical_labels.csv'
     dfc = pd.read_csv('temp/merged_categorical_labels.csv')
     dfc.rename(columns={'category':'values','label_type':'labels'},inplace=True)
-
+    
+    cat_summ = dfc.groupby(['labels','values'])['HealthCode'].nunique().reset_index().rename(columns={'HealthCode':'n_participants'})
+    # compute percentage
+    cat_tot = cat_summ.groupby('labels')['n_participants'].transform('sum')
+    cat_summ['percentage'] = cat_summ['n_participants'] / cat_tot 
+    cat_summ.to_csv('temp/cat_summary.csv',index=False)
+    
     # longitudinal labels - 'temp/longitudinal_labels.csv'
     dfl = pd.read_csv('temp/happiness_longitudinal.csv')
 
