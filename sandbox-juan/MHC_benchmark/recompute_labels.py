@@ -506,7 +506,26 @@ if 2 in compute_flag:
     # categorical labels - 'temp/merged_categorical_labels.csv'
     dfc = pd.read_csv('temp/merged_categorical_labels.csv')
     dfc.rename(columns={'category':'values','label_type':'labels'},inplace=True)
-    
+            
+        # compute the CVD categories - and disabiguation
+    aux = dfc.query('labels == "cardiovascular_disease"')
+    aux['labels'] = aux['values']
+    aux['values'] = aux['values'] != 'None of the above'
+    aux2 = aux.copy()
+    aux2['labels'] = 'cardiovascular_disease'
+    A = []
+    for disease in aux['labels'].unique():
+        if disease != 'None of the above':
+            aux0 = aux.query(f'labels == "{disease}"')
+            a = aux.query(f'labels != "{disease}"').drop_duplicates(subset=['HealthCode'])
+            a['labels'] = disease
+            a['values'] = False
+            A.append(pd.concat([aux0,a],axis=0,ignore_index=True))
+
+    aux = pd.concat(A,axis=0,ignore_index=True).drop_duplicates()
+    aux2 = aux2.sort_values(by='values',ascending=False).drop_duplicates(subset=['HealthCode'],keep='first')
+    dfc = pd.concat([dfc.query('labels != "cardiovascular_disease"'),
+                    aux,aux2],axis=0,ignore_index=True)
     cat_summ = dfc.groupby(['labels','values'])['HealthCode'].nunique().reset_index().rename(columns={'HealthCode':'n_participants'})
     # compute percentage
     cat_tot = cat_summ.groupby('labels')['n_participants'].transform('sum')
